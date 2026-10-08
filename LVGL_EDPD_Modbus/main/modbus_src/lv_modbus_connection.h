@@ -30,6 +30,7 @@ extern "C" {
 #define MODBUS_UART_BUF_SIZE    256
 #define MODBUS_QUEUE_SIZE       32
 #define MODBUS_MAX_REGS         13      /* 한 번에 읽을 수 있는 최대 레지스터 수 */
+#define MODBUS_MAX_BATCH_REQUESTS 12
 
 /**********************
  *      TYPEDEFS
@@ -48,6 +49,8 @@ typedef struct {
 /* 파싱 결과 — modbus_chart_queue로 전달 */
 typedef struct {
     uint32_t request_id; /* Match late responses to the originating UI request. */
+    bool valid; /* False on timeout, invalid frame, or Modbus exception. */
+    bool batch_complete; /* Last request finished, even when its response failed. */
     uint8_t  slave_id;
     uint8_t  function_code;
     uint16_t reg_addr;
@@ -55,10 +58,20 @@ typedef struct {
     int16_t  values[MODBUS_MAX_REGS];
 } modbus_data_t;
 
+/* One queued job; the UART worker sends its blocks sequentially. */
+typedef struct {
+    uint8_t count;
+    uint32_t baud_rate; /* Snapshot for the entire sweep. */
+    modbus_request_t requests[MODBUS_MAX_BATCH_REQUESTS];
+} modbus_batch_t;
+
 /**********************
  * GLOBAL PROTOTYPES
  **********************/
 void modbus_connection_init(void);
+/* Atomically queue a full sweep. False means nothing was queued. */
+bool modbus_send_batch(const modbus_request_t *requests, uint8_t count);
+bool modbus_send_batch_at_baud(const modbus_request_t *requests, uint8_t count, uint32_t baud_rate);
 
 /**
  * UI 태스크 등에서 호출 — 비동기로 요청 큐에 넣음

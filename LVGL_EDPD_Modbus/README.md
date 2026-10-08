@@ -1,241 +1,157 @@
-# LVGL project for ESP32
+# LVGL EDPD Modbus 센서 모니터
 
-This is an ESP32 demo project showcasing LVGL v7 with support for several display controllers and touch controllers.
+ESP32와 LVGL v7을 사용하는 Modbus RTU 센서 모니터링 프로그램입니다. **선택한 센서군의 전체 채널을 500ms 시작 간격으로 읽고**, 변환된 현재값과 통합 그래프를 표시합니다.
 
-![Example GUI_DEMO](images/new_photo.jpg)
+이 README는 현재 프로그램의 사용법과 동작을 설명합니다. 날짜별 변경 과정은 [today.md](today.md), 34개 채널의 주소·설정 목록은 [ModbusTable.csv](ModbusTable.csv)에 정리되어 있습니다.
 
-Monochrome support:
+최종 정리: **2026-10-08** — Home 및 센서별 탭, 현재값 툴팁, 보드레이트 선택까지 반영했습니다.
 
-![Example_mono](images/new_mono.jpg)
+## 화면 사용법
 
-Supported display controllers:
+1. **Home** 맨 위 왼쪽 콤보박스에서 보드레이트를 선택합니다. 기본값은 9600이며 19200, 38400, 57600, 115200, 230400, 460800, 921600을 지원합니다. 같은 줄 오른쪽의 **Modbus 시작 / 중지** 버튼으로 통신을 제어합니다. 기본 읽기 대상은 LWTM입니다.
+2. 상단의 **LWTM / BTM / B-WACS / O-WACS / AVM** 탭으로 그래프와 읽기 대상을 바꿉니다.
+3. 각 센서 탭에서는 해당 센서군의 모든 채널을 한 차트에 겹쳐 봅니다. 아래 두 열 카드에는 선 색상에 대응하는 채널명과 현재값을 표시합니다.
+4. Home의 아래쪽은 선택 버튼이 아닌 센서군별 정보 카드입니다. 채널 수, Slave ID, FC03과 읽기 주기를 표시하며, 현재 대상은 테두리로 구분합니다. 아래 카드는 스크롤해 확인합니다.
+5. **Modbus 중지**를 누르면 새로운 읽기를 예약하지 않습니다. 이미 진행 중인 묶음은 통신 작업에서 마무리하지만 그 결과는 화면에 반영하지 않습니다.
 
-## TFT
+- 그래프 오른쪽 위의 작은 범례형 툴팁 하나에 대표 채널의 현재값을 표시합니다. LWTM은 PS_Cyl1·Exh_Cyl1, BTM은 CrkP_Cyl1·MB_Fore, B-WACS는 CYL1_Wear_FS·CYL1_Wear_AS, O-WACS와 AVM은 단일 채널입니다. 선 색상과 동일한 색으로 변환값을 소수 둘째 자리까지 표시하며, 단위는 그래프 제목을 따릅니다. 수신 전·실패 시에는 `--`를 표시합니다. B-WACS는 시리얼 제외 상태이므로 실제 수신값이 없습니다.
+- 보드레이트 변경은 다음 전체 읽기부터 적용합니다. 진행 중인 읽기의 속도는 바뀌지 않으며, 재부팅하면 기본값 9600으로 돌아갑니다. 상대 장치와 동일한 속도를 선택해야 합니다.
+- Home으로 돌아와도 선택한 센서군의 통신과 그래프 기록은 계속됩니다. 다른 센서 탭으로 이동하면 읽기 대상과 그래프를 전환하고 이전 그래프 기록은 초기화합니다. 메모리 사용을 줄이기 위해 차트 하나를 해당 탭으로 이동해 재사용합니다.
+- 상단에는 작은 영문 폰트로 6개 탭을 표시하며, 그래프 높이는 기존 220에서 176(LV_DPX 기준, 80%)으로 조정했습니다.
+- 센서군을 바꾸면 표시와 읽기 대상이 바뀝니다. 이전 센서군의 늦은 응답은 새 화면에 반영하지 않습니다.
+- B-WACS는 현재 시리얼 출력 대상에서 제외되어 시작 버튼이 비활성화됩니다. 매핑과 그래프 설정은 보존합니다.
+- 기존 EDPD 센서 선택 버튼과 기능코드 선택 UI는 제거했습니다. 센서 읽기는 FC03으로 고정합니다.
+- 알람 판정·알람 기준선·알람 강조 기능은 없습니다. 그래프와 현재값을 표시합니다.
+- 기본 영문·숫자에는 **Montserrat 16**, 한글에는 **Galmuri**를 사용합니다. 상단 탭·툴팁·Home 카드의 상세 정보에는 작은 **Montserrat 12**를 사용합니다. 새 키보드·입력창도 이 테마를 상속하며, 현재 화면에는 별도 키보드 입력창이 없습니다.
 
-- ILI9341
-- ILI9488
-- ILI9486
-- HX8357B/HX8357D
-- ST7789
-- ST7735S
+## 데이터를 읽는 방식
 
-## Monochrome
+### 1. 선택한 센서군만 읽기
 
-- SH1107
-- SSD1306
+읽기 대상은 **현재 선택한 센서군의 전체 채널**입니다. 모든 센서군을 동시에 읽는 방식은 아닙니다.
 
-## e-Paper
+주소를 정렬하고 연속된 구간을 묶어서 FC03으로 요청합니다. **Device Address는 표의 10진수 값을 그대로 사용**하며, 앞자리를 제거하거나 1을 빼지 않습니다.
 
-- IL3820
+| 센서군 | 채널 수 | Slave ID | 한 바퀴의 요청 주소와 레지스터 수 | 요청 횟수 |
+|---|---:|---:|---|---:|
+| LWTM | 10 | 2 | 11083~11092: 10개 | 1회 |
+| BTM | 12 | 2 | 11003~11008: 6개 → 11011~11015: 5개 → 11321: 1개 | 3회 |
+| B-WACS | 10 | 0 | 매핑은 10004~10013이며, 현재 시리얼 읽기 제외 | 0회 |
+| O-WACS | 1 | 1 | 20: 1개 | 1회 |
+| AVM | 1 | 2 | 11129: 1개 | 1회 |
 
-Supported touchscreen controllers:
+BTM은 12개 값을 하나씩 요청하지 않고 **3개의 요청으로 읽습니다**. 표에 없는 11009·11010을 임의로 읽지 않으므로 세 구간으로 나눕니다. 화면의 채널 순서와 요청 주소 순서가 달라도 주소를 기준으로 값을 배분합니다.
 
-- XPT2046
-- FT3236
-- other FT6X36 or the FT6206 controllers should work as well (not tested)
-- STMPE610
+### 2. 응답을 받으면 다음 묶음 요청
 
-If your display controller is not supported consider contributing to this repo by
-adding support to it! [Contribute controller support](CONTRIBUTE_CONTROLLER_SUPPORT.md)
+한 바퀴의 요청 묶음을 하나의 작업으로 큐에 넣습니다. UART 작업이 각 묶음을 순차 처리합니다.
 
-## Get started
-### Install the ESP32 SDK
-http://esp-idf.readthedocs.io/en/latest/
-
-Note:
-
-This project tries to be compatible with both the ESP-IDF v3.x and v4.0, but using the v4.0 is recommended.
-Instructions here are given for the v4.x toolchain using `idf.py`, but it is easy to translate to make.
-For example instead of running `idf.py menuconfig`, just run `make menuconfig`.
-
-When using the ESP-IDF v3.x framework you must use `make` to build the project!.
-
-### Build this repository standalone and run the demo.
-
-Try this first to make sure your hardware is supported, wired and configured properly.
-
-1. Get this project: `git clone --recurse-submodules
-https://github.com/lvgl/lv_port_esp32.git`
-
-2. From its root run `idf.py menuconfig`
-
-3. Select your display kit or board and other options - see [config options](#configuration-options)
-
-4. For monochrome displays we suggest enabling the `unscii 8` font (Component config -> LVGL configuration -> FONT USAGE) and the MONO theme (Component config -> LVGL configuration -> THEME USAGE).
-
-5. Store your project configuration.
-
-6. For monochrome displays edit the `lv_conf.h` file available on the `components/lvgl` directory to look like follows:
-
-```
-#define LV_THEME_DEFAULT_INIT               lv_theme_mono_init
-#define LV_THEME_DEFAULT_COLOR_PRIMARY      LV_COLOR_BLACK
-#define LV_THEME_DEFAULT_COLOR_SECONDARY    LV_COLOR_WHITE
-#define LV_THEME_DEFAULT_FLAG               0
-#define LV_THEME_DEFAULT_FONT_SMALL         &lv_font_unscii_8
-#define LV_THEME_DEFAULT_FONT_NORMAL        &lv_font_unscii_8
-#define LV_THEME_DEFAULT_FONT_SUBTITLE      &lv_font_unscii_8
-#define LV_THEME_DEFAULT_FONT_TITLE         &lv_font_unscii_8
+```text
+전체 읽기 시작
+  → 작업에 저장된 보드레이트를 UART에 적용
+  → 첫 주소 묶음 요청
+  → 응답 수신 및 검사
+  → RTU 프레임 간격 유지
+  → 다음 주소 묶음 요청
+  → 마지막 묶음 처리 완료
+  → 숫자와 그래프를 함께 갱신
 ```
 
-7. `idf.py build`
+- 묶음 사이에 500ms를 기다리지 않습니다. UI 타이머의 다음 실행을 기다리지 않고 UART 작업이 다음 묶음을 요청합니다.
+- 수신 버퍼 전체 256바이트를 기다리지 않고, 실제 응답 길이만큼 수신합니다.
+- 분할 수신과 요청 에코를 처리하고, CRC·Slave ID·기능코드·응답 길이를 검사합니다.
+- 묶음당 응답 대기 제한은 **300ms**입니다. 타임아웃·예외·잘못된 응답이 발생해도 해당 묶음을 실패로 처리하고 다음 묶음으로 진행합니다.
+- 마지막 묶음이 실패한 경우에도 전체 읽기 완료를 통지합니다. UI 타이머만으로 완료를 추정하지 않습니다.
 
-8. `idf.py -p (YOUR PORT) flash` (with make this is just `make flash` - in 3.x PORT is configured in `menuconfig`)
+### 3. 500ms는 전체 읽기의 시작 간격
 
+- 최초 시작은 즉시 예약합니다.
+- 한 바퀴가 빨리 끝나면 **직전 시작 시점에서 500ms가 될 때까지** 기다립니다.
+- 500ms가 지나도 이전 읽기가 끝나지 않았다면 기다립니다. **동시에 두 바퀴를 실행하지 않습니다.**
+- 이전 읽기가 500ms를 초과했으면 완료 후 다음 바퀴를 시작합니다. 밀린 주기를 여러 번 연속 실행하지 않습니다.
 
+| 예시 | 첫 읽기 시작 | 첫 읽기 완료 | 다음 읽기 시작 |
+|---|---:|---:|---:|
+| 정상 완료 | 0ms | 120ms | 약 500ms |
+| 읽기 지연 | 0ms | 700ms | 약 700ms, 이전 읽기 완료 후 |
 
-### Support for development kits with embedded TFT displays.
+예약 확인은 10ms 간격의 LVGL 작업에서 수행합니다. 실제 UART 시작 시점에는 태스크 스케줄링과 RTU 프레임 간격에 따른 지연이 있을 수 있습니다. 응답이 지연되면 화면 갱신 간격도 500ms를 초과할 수 있습니다.
 
-Several ESP32 evaluation kits are supported via preconfigurations.
+### 4. 전체 응답을 모아서 화면 갱신
 
-- ESP Wrover Kit v4.1
-- M5Stack
-- M5Stick
-- M5StickC
-- Adafruit 3.5 Featherwing
-- RPi MPI3501
-- Wemos Lolin OLED
-- ER-TFT035-6
-- AIRcable ATAGv3
+한 바퀴의 모든 묶음이 완료된 뒤 현재값과 그래프를 한 번에 갱신합니다. 여러 선은 같은 읽기 주기를 기준으로 함께 전진합니다. 같은 주기에 표시하더라도 장비에서 모든 채널을 동시에 측정했다는 뜻은 아닙니다.
 
-### Install this project as a library submodule in your own project
+실패한 묶음에 속한 채널은 **응답 없음**으로 표시하고 그래프에 빈 구간을 남깁니다. 성공한 묶음의 채널은 정상적으로 갱신합니다.
 
-It is recommended to install this repo as a submodule in your IDF project's git repo. The configuration system has been designed so that you do not need to copy or edit any files in this repo. By keeping your submodule directory clean you can ensure reproducible builds and easy updates from this upstream repository.
+## 값 변환과 그래프 범위
 
-From your project root (you can get the esp32 idf project template [here](https://github.com/espressif/esp-idf-template)):
-
-1. `mkdir -p components`
-2. `git submodule add https://github.com/lvgl/lv_port_esp32.git components/lv_port_esp32`
-3. `git submodule update --init --recursive`
-4. Edit your CMake or Makefile to add this repo's components folder to the IDF components path.
-
-
-#### CMake
-
-The examples below are taken from the ESP-IDF [blink](https://github.com/espressif/esp-idf/tree/master/examples/get-started/blink) example which you can copy and use as the basis for your own project.
-The project root CMakeLists.txt file needs one line added, just before the project to add the extra components directory to the path like this:
-
-```cmake
-#CMakeLists.txt
-cmake_minimum_required(VERSION 3.5)
-
-include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-
-set(EXTRA_COMPONENT_DIRS components/lv_port_esp32/components/lv_examples components/lv_port_esp32/components/lvgl components/lv_port_esp32/components/lvgl_esp32_drivers/lvgl_tft components/lv_port_esp32/components/lvgl_esp32_drivers/lvgl_touch components/lv_port_esp32/components/lvgl_esp32_drivers)
-
-project(blink)
+```text
+표시값 = 수신 raw 정수 × Scale + Offset
 ```
 
+현재 Offset은 모두 0입니다. 현재값과 그래프에 동일한 변환 함수를 사용하며 숫자는 **소수 둘째 자리까지** 표시합니다.
 
-### Temporal workaround
+| 센서군 | Scale | Offset | 그래프 최소 | 그래프 최대 | 표시 단위 |
+|---|---:|---:|---:|---:|---|
+| LWTM | 0.1 | 0 | 0 | 300 | °C |
+| BTM | 0.1 | 0 | 0 | 200 | °C |
+| B-WACS | 1 | 0 | 1000 | 7000 | µm |
+| O-WACS | 0.01 | 0 | 0 | 1 | A<sub>w</sub> |
+| AVM | 0.01 | 0 | 0 | 20 | mm |
 
-When adding this project as a component you need to update it's CMakeLists.txt file located at the root directory, like so (comment out the include line):
+예: BTM/LWTM `723 → 72.30°C`, O-WACS `19 → 0.19 Aw`, AVM `576 → 5.76mm`.
 
-`components/lv_port_esp32/CMakeLists.txt`
+그래프 Y축은 센서별 범위로 고정합니다. 범위 밖의 값은 차트 경계에 표시하지만 현재값 자체는 자르지 않습니다. BTM/LWTM의 통신 분해능은 0.1°C이므로 소수 둘째 자리까지 표시해도 시뮬레이터 내부의 더 정밀한 값이 복원되지는 않습니다.
 
-```cmake
+## 통신 설정
 
-cmake_minimum_required(VERSION 3.5)
+| 항목 | 현재 설정 |
+|---|---|
+| 통신 | Modbus RTU / UART2 |
+| 속도 | Home에서 선택, 기본 9600 baud |
+| 데이터 형식 | 8 data bits, no parity, 1 stop bit |
+| TX / RX | GPIO27 / GPIO22 |
+| 센서 읽기 기능코드 | 0x03: Read Holding Registers |
+| 요청당 최대 레지스터 수 | 13개 |
+| 묶음당 응답 대기 | 300ms |
 
-# include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+속도는 전체 읽기 작업에 저장하여 UART 작업에서 한 번 적용합니다. UART 속도 설정이 실패하면 해당 읽기는 전송하지 않고 실패와 완료를 통지합니다. 500ms 시작 간격과 300ms 응답 제한은 속도를 바꿔도 동일합니다.
 
-set(EXTRA_COMPONENT_DIRS components/lv_port_esp32/components/lv_examples components/lv_port_esp32/components/lvgl components/lv_port_esp32/components/lvgl_esp32_drivers/lvgl_tft components/lv_port_esp32/components/lvgl_esp32_drivers/lvgl_touch components/lv_port_esp32/components/lvgl_esp32_drivers)
+통신 설정은 [lv_modbus_connection.h](main/modbus_src/lv_modbus_connection.h)와 [lv_modbus_connection.c](main/modbus_src/lv_modbus_connection.c)에 있습니다.
 
-if (NOT DEFINED PROJECT_NAME)
-	project(lvgl-demo)
-endif (NOT DEFINED PROJECT_NAME)
+## 소스 및 설정 위치
 
+| 경로 | 역할 |
+|---|---|
+| [main/main.c](main/main.c) | LVGL·디스플레이·터치 초기화 및 UI 실행 |
+| [lv_modbus.c](main/modbus_src/lv_modbus.c) | Home / 센서별 그래프 탭과 테마 생성 |
+| [lv_edpd_widgets.c](main/modbus_src/lv_edpd_widgets.c) | Home 정보 카드·보드레이트 선택, 탭별 센서 전환, 시작·중지, 500ms 예약, 그래프·툴팁·현재값 |
+| [lv_modbus_connection.c](main/modbus_src/lv_modbus_connection.c) | UART 작업, 요청 큐, 프레임 생성·수신·CRC 검사 |
+| [lv_sensor_profiles.c](main/modbus_src/lv_sensor_profiles.c) | 센서·채널 주소, Scale/Offset, 단위, 범위, 시리얼 읽기 사용 여부 |
+| [lv_app_font.c](main/modbus_src/lv_app_font.c) | 영문/한글 혼합 폰트 및 단위 기호 |
+| [main/CMakeLists.txt](main/CMakeLists.txt) | 애플리케이션 소스 등록과 컴포넌트 연결 |
+| [sdkconfig](sdkconfig) | 디스플레이·터치·LVGL 등 ESP-IDF 설정, LVGL 메모리 64KB |
+| [ModbusTable.csv](ModbusTable.csv) | 센서별 34개 채널 설정 목록, UTF-8 BOM 형식 |
+| [today.md](today.md) | 날짜별 작업 내용과 검증 기록 |
+
+실행에 사용하는 설정은 C 소스에 하드코딩되어 있습니다. **CSV를 수정하는 것만으로 프로그램 설정이 변경되지는 않습니다.** 주소·Scale·범위·읽기 정책을 변경할 때 소스, CSV, README를 함께 갱신하고 변경 이력은 `today.md`에 기록합니다.
+
+## 빌드 및 검증
+
+기존 개발 환경은 ESP-IDF 4.4.3 / LVGL v7입니다. 프로젝트 폴더에서 ESP-IDF 환경을 활성화한 뒤 빌드합니다. 기존 `build` 캐시에 다른 프로젝트 경로가 들어 있어 별도 빌드 폴더를 사용합니다.
+
+```sh
+idf.py -B build_modbus_src build
 ```
 
-In the CMakeLists.txt file for your `/main` or for the component(s) using LVGL you need to add REQUIRES directives for this project's driver and lvgl itself to the `idf_component_register` function, it should look like this:
+Python 3와 GCC가 있는 호스트에서는 다음 검증을 실행할 수 있습니다.
 
-
-```cmake
-set (SOURCES main.c)
-
-idf_component_register(SRCS ${SOURCES}
-    INCLUDE_DIRS .
-    REQUIRES lvgl_esp32_drivers lvgl lv_examples lvgl_tft lvgl_touch)
-
-target_compile_definitions(${COMPONENT_LIB} PRIVATE LV_CONF_INCLUDE_SIMPLE=1)
+```sh
+python3 tests/run_sensor_ui.py
+python3 tests/run_modbus_transport.py
 ```
 
-Please note that if your project require the use of the `nvs_flash` module \(for example required by WiFi\), it should be put in the `REQUIRES` list.
-
-#### Makefile
-If you are using make, you only need to add the EXTRA_COMPONENT_DIRS in the root Makefile of your project:
-```Makefile
-PROJECT_NAME := blink
-
-EXTRA_COMPONENT_DIRS := components/lv_port_esp32/components/lv_examples \
-    components/lv_port_esp32/components/lvgl \
-    components/lv_port_esp32/components/lvgl_esp32_drivers/lvgl_tft \
-    components/lv_port_esp32/components/lvgl_esp32_drivers/lvgl_touch \
-    components/lv_port_esp32/components/lvgl_esp32_drivers \
-
-include $(IDF_PATH)/make/project.mk
-```
-
-## Configuration options
-There are a number of configuration options available, all accessed through `idf.py menuconfig` -> Components -> LittlevGL (LVGL).
-
-![Main Menu](images/menu-main.png)
-![Component Menu](images/new_lvgl_options.png)
-
-You can configure the TFT controller and the touch controller (if your display have one)
-
-![TFT Controller Menu](images/tft_controllers_options.png)
-![Touch Controller Menu](images/touch_menu.png)
-
-## Touch Controller options
-
-Options include:
- * Touch controller options
-
-![Touch Controllers](images/touch_controllers_options.png)
-
- * Pinout
-
-![Touch pinout](images/touch_pinout.png)
-
- * SPI Bus: Choose what SPI bus is used to communicate with the touch controller.
-
-![Touch SPI Bus](images/touch_spi_bus.png)
-
- * Touchpanel configuration: Maximum and minimum coordinate values, inverting coordinate values, etc.
-
-![Touchpanel Configuration](images/touch_touch_panel_config.png)
-
-## TFT Controller options
-
-Options include:
-
- * Display controller: Support for the most common TFT display controllers
-
-![TFT Display Controllers](images/tft_display_controller.png)
-
- * SPI Bus: Choose what SPI bus is used to communicate with the tft controller.
-
-![Touch SPI Bus](images/tft_spi_bus.png)
-
- * Display resolution - set the height and width of the display
-
-![TFT Resolution](images/tft_width_height.png)
-
- * Invert display - if text and objects are backwards, you can enable this
- * Enable backlight control via GPIO (vs hardwiring on)
- * Backlight active high or low - some displays expect a high (1) signal to enable backlight, others expect (low) (default) - if your backlight doesn't come on try switching this
-
-![TFT Backlight Control](images/tft_backlight_control.png)
-
-### Assign the correct pinout depending on your ESP32 dev board
-There are several development boards based on the ESP32 chip, make sure you assign the correct pin numbers to the signals that interface with the TFT display board. Its recommended to use a predefined configuration below, but you can also set individual pins for both display controller and touch controller.
-
-![Pins](images/tft_pin_assignments.png)
-
-### Predefined Display Configurations
-
-![Predefines](images/tft_predefined_display_config.png)
-
-For development kits that come with a display already attached, all the correct settings are already known and can be selected in `menuconfig` from the first option "Select predefined display configuration." Once selected all the other options will be defaulted and won't appear in the menu.
-
+- UI 테스트: 실제 LVGL 소스를 사용해 500ms 시작 간격, 중복 실행 방지, 주소 묶음·응답 매핑, 일괄 갱신, 범위·단위 변환, 폰트 선택, 센서군 100회 전환, Home 복귀 시 통신 유지, 대표 채널 툴팁, 보드레이트 변경의 다음 읽기 적용을 검사합니다.
+- 통신 테스트: UART/FreeRTOS를 모의 처리하고 실제 프레임·수신 코드를 사용해 분할 응답, 에코, CRC 오류, 예외, 타임아웃, 순차 요청과 완료 통지, 보드레이트 적용·잘못된 속도 거부·속도 설정 실패 시 전송 방지를 검사합니다.
+- **현재 확인된 결과:** 두 호스트 테스트 통과, 320×240 화면 렌더링 확인.
+- **미검증:** ESP-IDF 펌웨어 전체 빌드와 실제 장비 통신. Windows ESP-IDF 도구를 WSL에서 실행할 때 `UtilBindVsockAnyPort: socket failed 1` 오류가 발생했습니다. 호스트 테스트 통과는 펌웨어 빌드·실기 검증을 대신하지 않습니다.

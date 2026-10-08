@@ -57,7 +57,7 @@ void modbus_connection_init(void)
 	esp_log_level_set("MODBUS_UI", ESP_LOG_DEBUG);
     ESP_LOGI(TAG, "modbus_connection_init called");
     modbus_chart_queue = xQueueCreate(MODBUS_QUEUE_SIZE, sizeof(modbus_data_t));
-    s_req_queue        = xQueueCreate(8, sizeof(modbus_request_t));
+    s_req_queue        = xQueueCreate(2, sizeof(modbus_batch_t));
     uart_modbus_init();
     xTaskCreatePinnedToCore(modbus_master_task, "modbus_master", 4096, NULL, 5, NULL, 0);
 }
@@ -84,13 +84,6 @@ void modbus_send_read_request_to(QueueHandle_t response_queue, uint8_t slave_id,
                                  uint8_t function_code, uint16_t reg_addr,
                                  uint16_t reg_count, uint32_t request_id)
 {
-    if (!response_queue || !s_req_queue) return;
-    if (function_code < 0x01 || function_code > 0x04) return;
-    if ((uint32_t)reg_addr + reg_count > 65536U) return;
-    if (reg_count == 0 || reg_count > MODBUS_MAX_REGS) {
-        ESP_LOGE(TAG, "reg_count out of range: %d", reg_count);
-        return;
-    }
     modbus_request_t req = {
         .response_queue = response_queue,
         .request_id = request_id,
@@ -99,9 +92,31 @@ void modbus_send_read_request_to(QueueHandle_t response_queue, uint8_t slave_id,
         .reg_addr  = reg_addr,
         .reg_count = reg_count,
     };
-    BaseType_t r = xQueueSend(s_req_queue, &req, 0);
-    // ESP_LOGI	(TAG, "send_request slave=0x%02X reg=0x%04X cnt=%d queued=%s",
-    //          slave_id, reg_addr, reg_count, r == pdTRUE ? "OK" : "FAIL(queue full)");
+    modbus_send_batch(&req, 1);
+}
+
+bool modbus_send_batch(const modbus_request_t *requests, uint8_t count)
+{
+    return modbus_send_batch_at_baud(requests, count, MODBUS_UART_BAUD);
+}
+
+bool modbus_send_batch_at_baud(const modbus_request_t *requests, uint8_t count, uint32_t baud_rate)
+{
+    switch (baud_rate) {
+        case 9600: case 19200: case 38400: case 57600:
+        case 115200: case 230400: case 460800: case 921600: break;
+        default: return false;
+    }
+    if (!s_req_queue || !requests || count == 0 || count > MODBUS_MAX_BATCH_REQUESTS) return false;
+    modbus_batch_t batch = {.count = count, .baud_rate = baud_rate};
+    for (unsigned i = 0; i < count; i++) {
+        const modbus_request_t *req = &requests[i];
+        if (!req->response_queue || req->function_code < 1 || req->function_code > 4 ||
+            req->reg_count == 0 || req->reg_count > MODBUS_MAX_REGS ||
+            (uint32_t)req->reg_addr + req->reg_count > 65536U) return false;
+        batch.requests[i] = *req;
+    }
+    return xQueueSend(s_req_queue, &batch, 0) == pdTRUE;
 }
 
 /**********************
@@ -117,11 +132,6 @@ static void uart_modbus_init(void)
         .stop_bits  = UART_STOP_BITS_1,
         .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
     };
-    uart_param_config(MODBUS_UART_PORT, &cfg);
-    uart_set_pin(MODBUS_UART_PORT,
-                 MODBUS_UART_TX_PIN, MODBUS_UART_RX_PIN,
-                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    uart_driver_install(MODBUS_UART_PORT, MODBUS_UART_BUF_SIZE * 2, 0, 0, NULL, 0);
 	esp_err_t e1 = uart_param_config(MODBUS_UART_PORT, &cfg);
     esp_err_t e2 = uart_set_pin(MODBUS_UART_PORT, MODBUS_UART_TX_PIN, MODBUS_UART_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     esp_err_t e3 = uart_driver_install(MODBUS_UART_PORT, MODBUS_UART_BUF_SIZE * 2, 0, 0, NULL, 0);
@@ -129,61 +139,79 @@ static void uart_modbus_init(void)
 	
 }
 
+/* Read only the expected response, not the whole UART buffer. A fragmented
+ * frame shares one overall deadline; an exact local request echo is skipped. */
+static bool receive_response(const modbus_request_t *req, const uint8_t frame[8],
+                             modbus_data_t *out)
+{
+    uint8_t buf[MODBUS_UART_BUF_SIZE];
+    unsigned len = 0;
+    TickType_t started = xTaskGetTickCount();
+    while (1) {
+        if (len >= 8 && memcmp(buf, frame, 8) == 0) {
+            memmove(buf, buf + 8, len - 8);
+            len -= 8;
+        }
+        unsigned target = 3;
+        if (len >= 3) {
+            unsigned bytes = req->function_code <= 2
+                ? (req->reg_count + 7) / 8 : req->reg_count * 2;
+            target = (buf[1] & 0x80) ? 5 : 5 + bytes;
+            if (len >= target) {
+                if (len == target && parse_modbus_response(buf, len, req, out)) return true;
+                /* A single-register reply is 7 bytes; a request echo is 8. */
+                if (len < 8 && memcmp(buf, frame, len) == 0) target = 8;
+                else return false;
+            }
+        }
+        TickType_t elapsed = xTaskGetTickCount() - started;
+        if (elapsed >= MODBUS_RESP_TIMEOUT || target > sizeof(buf)) return false;
+        int n = uart_read_bytes(MODBUS_UART_PORT, buf + len, target - len,
+                                MODBUS_RESP_TIMEOUT - elapsed);
+        if (n <= 0) return false;
+        len += n;
+    }
+}
+
+static void process_batch(const modbus_batch_t *batch)
+{
+    /* Only the UART worker changes speed, before any frame in this sweep. */
+    uint32_t baud = batch->baud_rate ? batch->baud_rate : MODBUS_UART_BAUD;
+    bool speed_ok = uart_set_baudrate(MODBUS_UART_PORT, baud) == 0;
+    if (!speed_ok) ESP_LOGE(TAG, "Unable to set baud rate %u", (unsigned)baud);
+    for (unsigned i = 0; i < batch->count; i++) {
+        const modbus_request_t *req = &batch->requests[i];
+        uint8_t frame[8];
+        build_read_request(req, frame);
+        if (speed_ok) {
+            uart_flush_input(MODBUS_UART_PORT);
+            uart_write_bytes(MODBUS_UART_PORT, (const char *)frame, sizeof(frame));
+            uart_wait_tx_done(MODBUS_UART_PORT, pdMS_TO_TICKS(50));
+        }
+        modbus_data_t data = {
+            .request_id = req->request_id,
+            .slave_id = req->slave_id,
+            .function_code = req->function_code,
+            .reg_addr = req->reg_addr,
+            .reg_count = req->reg_count,
+        };
+        data.valid = speed_ok && receive_response(req, frame, &data);
+        data.batch_complete = i + 1 == batch->count;
+        /* Always notify completion, including timeouts. The UI never guesses
+         * that a still-running sweep has finished based on its own timer. */
+        xQueueSend(req->response_queue, &data, portMAX_DELAY);
+        /* Conservative RTU silence for all supported speeds (9600 and above). */
+        vTaskDelay(pdMS_TO_TICKS(5) + 1);
+    }
+}
+
 static void modbus_master_task(void *pvParameter)
 {
-    modbus_request_t req;
-    uint8_t          frame[8];
-    uint8_t          buf[MODBUS_UART_BUF_SIZE];
-	static uint32_t last_tick  = 0;
-	static uint32_t now  = 0;
-    ESP_LOGI(TAG, "modbus_master_task started");
+    (void)pvParameter;
+    modbus_batch_t batch;
     while (1) {
-        /* 요청이 올 때까지 대기 */
-        if (xQueueReceive(s_req_queue, &req, portMAX_DELAY) != pdTRUE) continue;
-        /* 읽기 요청 프레임 빌드 후 전송 */
-        build_read_request(&req, frame);
-        uart_flush_input(MODBUS_UART_PORT);
-        uart_write_bytes(MODBUS_UART_PORT, (const char *)frame, sizeof(frame));
-
-        /* TX 완료 대기 — 자동방향 RS485 모듈이 TX→RX 전환하기 전에 읽기 시작하면 응답 놓침 */
-        uart_wait_tx_done(MODBUS_UART_PORT, pdMS_TO_TICKS(50));
-
-        /* 응답 대기 */
-        int len = uart_read_bytes(MODBUS_UART_PORT, buf, sizeof(buf), MODBUS_RESP_TIMEOUT);
-		now = xTaskGetTickCount();
-        /* 디버그: 수신 raw 바이트 출력 */
-        if (len > 0) {
-            ESP_LOGI(TAG, "Delay:%d RX %d bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02x %02x %02x %02x %02x %02x %02x %02x %02X %02X %02X %02X %02X %02X %02X %02X %02x %02x %02x %02x %02x %02x %02x",
-                     (now - last_tick), len,
-                     len > 0 ? buf[0] : 0, len > 1 ? buf[1] : 0,
-                     len > 2 ? buf[2] : 0, len > 3 ? buf[3] : 0,
-                     len > 4 ? buf[4] : 0, len > 5 ? buf[5] : 0,
-                     len > 6 ? buf[6] : 0, len > 7 ? buf[7] : 0,
-					 len > 8 ? buf[8] : 0, len > 9 ? buf[9] : 0,
-					 len > 10 ? buf[10] : 0, len > 11 ? buf[11] : 0,
-					 len > 12 ? buf[12] : 0, len > 13 ? buf[13] : 0,
-					 len > 14 ? buf[14] : 0, len > 15 ? buf[15] : 0,
-					 len > 16 ? buf[16] : 0, len > 17 ? buf[17] : 0,
-					 len > 18 ? buf[18] : 0, len > 19 ? buf[19] : 0,
-					 len > 20 ? buf[20] : 0, len > 21 ? buf[21] : 0,
-					 len > 22 ? buf[22] : 0, len > 23 ? buf[23] : 0,
-					 len > 24 ? buf[24] : 0, len > 25 ? buf[25] : 0,
-					 len > 26 ? buf[26] : 0, len > 27 ? buf[27] : 0,
-					 len > 28 ? buf[28] : 0, len > 29 ? buf[29] : 0,
-					 len > 30 ? buf[30] : 0);
-        }
-		last_tick = now;
-
-        if (len < MODBUS_MIN_FRAME_LEN) {
-            // ESP_LOGW(TAG, "Timeout or short response (len=%d) slave=0x%02X reg=0x%04X",
-            //          len, req.slave_id, req.reg_addr);
-            continue;
-        }
-
-        modbus_data_t data;
-        if (parse_modbus_response(buf, len, &req, &data)) {
-            xQueueSend(req.response_queue, &data, 0);
-        }
+        if (xQueueReceive(s_req_queue, &batch, portMAX_DELAY) == pdTRUE)
+            process_batch(&batch);
     }
 }
 
@@ -268,6 +296,7 @@ static bool parse_modbus_response(const uint8_t *buf, int len,
     }
 
     memset(out, 0, sizeof(*out));
+    out->valid = true;
     out->request_id = req->request_id;
     out->slave_id  = buf[0];
     out->function_code = req->function_code;

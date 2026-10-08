@@ -34,7 +34,7 @@ def main():
         flags = ["-std=gnu99", "-O0", "-g", "-Werror=implicit-function-declaration",
                  "-include", str(temp / "sdkconfig.h"), "-DLV_CONF_INCLUDE_SIMPLE=1",
                  f"-I{temp}", "-Icomponents/lvgl", "-Icomponents/lvgl/lvgl", "-Imain/modbus_src"]
-        sources = [ROOT / "tests/test_sensor_ui.c", ROOT / "main/modbus_src/lv_sensor_profiles.c"]
+        sources = [ROOT / "tests/test_sensor_ui.c", ROOT / "main/modbus_src/lv_sensor_profiles.c", ROOT / "main/modbus_src/lv_app_font.c"]
         sources += sorted((ROOT / "components/lvgl/lvgl/src").rglob("*.c"))
 
         def compile_source(item):
