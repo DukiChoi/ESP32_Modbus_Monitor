@@ -1,0 +1,21 @@
+# ESP-IDF build outputs and local configuration backups
+build/
+sdkconfig.old
+
+# Editor settings and generated logs
+.vscode/
+*.log
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local credentials
+.env
+.env.*
+!.env.example
+
+# OS metadata
+.DS_Store
+Thumbs.db

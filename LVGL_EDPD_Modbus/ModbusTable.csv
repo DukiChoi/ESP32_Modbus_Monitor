@@ -1,0 +1,35 @@
+﻿Sensor,Group,Channel,SlaveID,DeviceAddress,FunctionCode
+LWTM,Pump Side,PS_Cyl1,2,11083,0x03
+LWTM,Pump Side,PS_Cyl2,2,11084,0x03
+LWTM,Pump Side,PS_Cyl3,2,11085,0x03
+LWTM,Pump Side,PS_Cyl4,2,11086,0x03
+LWTM,Pump Side,PS_Cyl5,2,11087,0x03
+LWTM,Exh Side,Exh_Cyl1,2,11088,0x03
+LWTM,Exh Side,Exh_Cyl2,2,11089,0x03
+LWTM,Exh Side,Exh_Cyl3,2,11090,0x03
+LWTM,Exh Side,Exh_Cyl4,2,11091,0x03
+LWTM,Exh Side,Exh_Cyl5,2,11092,0x03
+BTM,Crank Pin Bearing,CrkP_Cyl1,2,11011,0x03
+BTM,Crank Pin Bearing,CrkP_Cyl2,2,11012,0x03
+BTM,Crank Pin Bearing,CrkP_Cyl3,2,11013,0x03
+BTM,Crank Pin Bearing,CrkP_Cyl4,2,11014,0x03
+BTM,Crank Pin Bearing,CrkP_Cyl5,2,11015,0x03
+BTM,Main Bearing,MB_Fore,2,11003,0x03
+BTM,Main Bearing,MB_Cyl1,2,11004,0x03
+BTM,Main Bearing,MB_Cyl2,2,11005,0x03
+BTM,Main Bearing,MB_Cyl3,2,11006,0x03
+BTM,Main Bearing,MB_Cyl4,2,11007,0x03
+BTM,Main Bearing,MB_Cyl5,2,11008,0x03
+BTM,Main Bearing,MB_Thrust,2,11321,0x03
+B-WACS,Fore Side,CYL1_Wear_FS,0,10004,0x03
+B-WACS,Fore Side,CYL2_Wear_FS,0,10006,0x03
+B-WACS,Fore Side,CYL3_Wear_FS,0,10008,0x03
+B-WACS,Fore Side,CYL4_Wear_FS,0,10010,0x03
+B-WACS,Fore Side,CYL5_Wear_FS,0,10012,0x03
+B-WACS,After Side,CYL1_Wear_AS,0,10005,0x03
+B-WACS,After Side,CYL2_Wear_AS,0,10007,0x03
+B-WACS,After Side,CYL3_Wear_AS,0,10009,0x03
+B-WACS,After Side,CYL4_Wear_AS,0,10011,0x03
+B-WACS,After Side,CYL5_Wear_AS,0,10013,0x03
+O-WACS,,Water Activity,1,20,0x03
+AVM,,AVM,2,11129,0x03
