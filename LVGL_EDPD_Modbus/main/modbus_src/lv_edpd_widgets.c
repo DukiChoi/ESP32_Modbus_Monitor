@@ -1,5 +1,6 @@
-/** EDPD controls and a separate, overlaid sensor-group graph. */
+/** All-sensor acquisition, Home reception status and per-group graph history. */
 #include "lv_edpd_widgets.h"
+#include "lv_app_font.h"
 #include "lv_modbus_connection.h"
 #include "lv_sensor_profiles.h"
 #include <string.h>
@@ -21,8 +22,10 @@ static lv_obj_t *s_start_label;
 static lv_obj_t *s_baud_dropdown;
 static const uint32_t s_baud_rates[] = {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600};
 static char s_axis_text[96];
-static uint16_t s_cycle_raw[SENSOR_MAX_CHANNELS];
-static bool s_cycle_valid[SENSOR_MAX_CHANNELS];
+static uint16_t s_all_raw[SENSOR_PROFILE_COUNT][SENSOR_MAX_CHANNELS];
+static bool s_all_valid[SENSOR_PROFILE_COUNT][SENSOR_MAX_CHANNELS];
+static bool s_received[SENSOR_PROFILE_COUNT];
+static TickType_t s_received_at[SENSOR_PROFILE_COUNT];
 static const uint32_t s_colors[SENSOR_MAX_CHANNELS] = {
     0xE53935, 0x1E88E5, 0x43A047, 0xFB8C00, 0x8E24AA, 0x00ACC1,
     0xD81B60, 0x7CB342, 0x6D4C41, 0x3949AB, 0x00897B, 0xF9A825,
@@ -33,12 +36,14 @@ static lv_obj_t *s_status;
 static lv_obj_t *s_start;
 static lv_obj_t *s_graph_pages[SENSOR_PROFILE_COUNT];
 static lv_obj_t *s_info_cards[SENSOR_PROFILE_COUNT];
-static channel_view_t s_views[SENSOR_MAX_CHANNELS];
+static channel_view_t s_all_views[SENSOR_PROFILE_COUNT][SENSOR_MAX_CHANNELS];
+#define s_views s_all_views[s_selected]
 static QueueHandle_t s_responses;
 static unsigned s_selected;
 static modbus_request_t s_blocks[SENSOR_MAX_CHANNELS];
 static bool s_block_done[SENSOR_MAX_CHANNELS];
 static unsigned s_block_count;
+static unsigned s_block_profile[SENSOR_MAX_CHANNELS];
 static unsigned s_batch_count;
 static modbus_request_t s_batch_requests[SENSOR_MAX_CHANNELS];
 static TickType_t s_last_start;
@@ -47,14 +52,16 @@ static bool s_running;
 static uint32_t s_generation;
 static uint32_t s_serial;
 
-/* Keep the in-flight request until response/timeout even across sensor changes.
- * A generation check prevents it from updating the new sensor's charts. */
+/* Keep in-flight sweeps until completion; generations reject replies from
+ * before stop/restart. Tab changes never affect acquisition. */
 static bool s_pending;
 static uint32_t s_pending_generation;
 
 
 /* Value labels use the mixed-language font, with a lowered w for A-subscript-w. */
 static lv_font_t s_value_font;
+static lv_font_t s_small_value_font;
+static lv_font_t s_number_font;
 static const lv_font_t *s_base_font;
 static const uint8_t s_sub_w_bitmap[] = {0x83, 0x06, 0x4a, 0xa2, 0x80};
 static bool value_glyph(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
@@ -70,13 +77,19 @@ static bool value_glyph(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
         dsc->ofs_y = -1;
         return true;
     }
-    return lv_font_get_glyph_dsc(s_base_font, dsc, letter, next);
+    const lv_font_t *base = font == &s_small_value_font && letter < 0x100
+        ? &lv_font_montserrat_9 :
+        font == &s_number_font && letter < 0x100 && letter != 0xB5 ? &lv_font_montserrat_12 : s_base_font;
+    return lv_font_get_glyph_dsc(base, dsc, letter, next);
 }
 static const uint8_t *value_bitmap(const lv_font_t *font, uint32_t letter)
 {
     (void)font;
     if (letter == 'w') return s_sub_w_bitmap;
-    return lv_font_get_glyph_bitmap(s_base_font, letter);
+    const lv_font_t *base = font == &s_small_value_font && letter < 0x100
+        ? &lv_font_montserrat_9 :
+        font == &s_number_font && letter < 0x100 && letter != 0xB5 ? &lv_font_montserrat_12 : s_base_font;
+    return lv_font_get_glyph_bitmap(base, letter);
 }
 
 static const sensor_profile_t *selected_profile(void)
@@ -86,12 +99,25 @@ static const sensor_profile_t *selected_profile(void)
 
 static void update_status(void)
 {
-    const sensor_profile_t *profile = selected_profile();
     lv_label_set_text(s_start_label, s_running ? "Modbus 중지" : "Modbus 시작");
-    lv_label_set_text_fmt(s_status, "%s · %u channels | ID %u\n%s",
-        profile->name, (unsigned)profile->channel_count, (unsigned)profile->slave_id,
-        !profile->serial_enabled ? "시리얼 출력 대상 제외" :
-        !s_responses ? "응답 큐 생성 실패" : s_running ? "통신 중 (500ms)" : "연결 대기");
+    lv_label_set_text(s_status, !s_responses ? "Response queue unavailable" :
+        s_running ? "FC03 | 500ms | RUNNING" : "FC03 | 500ms | STOPPED");
+}
+
+static void update_reception(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    for (unsigned i = 0; i < SENSOR_PROFILE_COUNT; i++) {
+        bool active = s_running && s_received[i] && now - s_received_at[i] < pdMS_TO_TICKS(1500);
+        lv_color_t color = lv_color_hex(active ? 0x16A34A : 0x6B7280);
+        lv_obj_set_style_local_bg_color(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, color);
+        lv_obj_set_style_local_bg_grad_color(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, color);
+        lv_obj_set_style_local_bg_opa(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_COVER);
+        lv_obj_set_style_local_border_color(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, color);
+        lv_obj_set_style_local_border_width(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 1);
+        lv_obj_set_style_local_border_opa(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_COVER);
+        lv_obj_set_style_local_text_color(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
+    }
 }
 
 static void format_value(char *out, size_t size, uint16_t raw)
@@ -149,6 +175,16 @@ static lv_obj_t *row_create(lv_obj_t *parent, lv_coord_t width)
     return row;
 }
 
+/* Shorten only the presentation name; wire mapping and CSV names stay intact. */
+static void channel_display_name(unsigned channel, char *out, size_t size)
+{
+    const sensor_profile_t *profile = selected_profile();
+    const char *name = profile->channels[channel].name;
+    const char *wear = strcmp(profile->name, "B-WACS") == 0 ? strstr(name, "Wear_") : NULL;
+    if (wear) lv_snprintf(out, size, "%.*s%s", (int)(wear - name), name, wear + 5);
+    else lv_snprintf(out, size, "%s", name);
+}
+
 /* One compact legend: units are shown in the graph title above it. */
 static void update_tooltip(bool initial)
 {
@@ -157,10 +193,13 @@ static void update_tooltip(bool initial)
     size_t used = 0;
     for (unsigned i = 0; i < profile->channel_count; i++) {
         if (!profile->channels[i].show_tooltip) continue;
+        char name[40];
+        channel_display_name(i, name, sizeof(name));
         char value[24] = "--";
-        if (!initial && s_cycle_valid[i]) format_value(value, sizeof(value), s_cycle_raw[i]);
+        if (!initial && s_views[i].valid[CHART_POINTS - 1])
+            format_value(value, sizeof(value), s_views[i].history[CHART_POINTS - 1]);
         used += lv_snprintf(text + used, sizeof(text) - used, "%s#%06X %s: %s#",
-            used ? "\n" : "", (unsigned)s_colors[i], profile->channels[i].name, value);
+            used ? "\n" : "", (unsigned)s_colors[i], name, value);
     }
     lv_label_set_text(s_tooltip, text);
     lv_obj_align(s_tooltip, s_chart, LV_ALIGN_IN_TOP_RIGHT, -8, 8);
@@ -169,13 +208,13 @@ static void update_tooltip(bool initial)
 static void rebuild_graphs(void)
 {
     lv_obj_clean(s_graphs);
-    memset(s_views, 0, sizeof(s_views));
-    memset(s_cycle_valid, 0, sizeof(s_cycle_valid));
+
     const sensor_profile_t *profile = selected_profile();
     lv_coord_t content_width = lv_obj_get_width_fit(s_graphs) - COMPONENT_RIGHT_SPACE;
     lv_obj_t *title = lv_label_create(s_graphs, NULL);
     lv_obj_set_style_local_text_font(title, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &s_value_font);
-    lv_label_set_text_fmt(title, "%s (%s)", profile->name, profile->unit);
+    lv_label_set_text_fmt(title, profile->channel_count == 1 ? "%s: -- %s" : "%s (%s)",
+        profile->name, profile->unit);
     s_chart = lv_chart_create(s_graphs, NULL);
     lv_obj_set_size(s_chart, content_width, LV_DPX(176));
     lv_obj_set_drag_parent(s_chart, true);
@@ -202,29 +241,50 @@ static void rebuild_graphs(void)
     lv_obj_set_style_local_radius(s_tooltip, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, 4);
     lv_obj_set_drag_parent(s_tooltip, true);
     update_tooltip(true);
+    lv_obj_set_hidden(s_tooltip, profile->channel_count == 1);
     /* All channels share one time axis and one physical-value scale. */
     lv_obj_t *row = NULL;
-    lv_coord_t column_width = (content_width - 8) / 2;
+    lv_coord_t column_width = (content_width - 6) / 4;
     for (unsigned i = 0; i < profile->channel_count; i++) {
-        if (i % 2 == 0) row = row_create(s_graphs, content_width);
+        if (profile->channel_count > 1 && i % 4 == 0) {
+            row = row_create(s_graphs, content_width);
+            lv_obj_set_style_local_pad_inner(row, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 2);
+        }
         channel_view_t *view = &s_views[i];
         lv_color_t color = lv_color_hex(s_colors[i]);
         view->series = lv_chart_add_series(s_chart, color);
         lv_chart_clear_serie(s_chart, view->series);
+        if (profile->channel_count == 1) {
+            view->value_label = title;
+            continue;
+        }
         lv_obj_t *card = lv_cont_create(row, NULL);
         lv_cont_set_layout(card, LV_LAYOUT_COLUMN_LEFT);
         lv_cont_set_fit2(card, LV_FIT_NONE, LV_FIT_TIGHT);
         lv_obj_set_width(card, column_width);
         card_style(card);
+        set_padding(card, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 2);
+        lv_obj_set_style_local_pad_left(card, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 0);
+        lv_obj_set_style_local_pad_right(card, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 0);
+        lv_obj_set_style_local_radius(card, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 6);
         lv_obj_set_style_local_border_color(card, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, color);
+        lv_obj_set_style_local_pad_inner(card, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 1);
+        lv_obj_t *name_label = lv_label_create(card, NULL);
+        lv_obj_set_style_local_text_font(name_label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_12);
+        lv_obj_set_style_local_text_letter_space(name_label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, -1);
+        lv_obj_set_style_local_text_color(name_label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, color);
+        char name[40];
+        channel_display_name(i, name, sizeof(name));
+        lv_label_set_text(name_label, name);
+        lv_obj_set_drag_parent(name_label, true);
         view->value_label = lv_label_create(card, NULL);
-        lv_obj_set_style_local_text_font(view->value_label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &s_value_font);
+        lv_obj_set_style_local_text_font(view->value_label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &s_number_font);
+        lv_obj_set_style_local_text_letter_space(view->value_label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, -1);
         lv_label_set_long_mode(view->value_label, LV_LABEL_LONG_BREAK);
         lv_obj_set_width(view->value_label, lv_obj_get_width_fit(card));
         lv_obj_set_drag_parent(view->value_label, true);
         lv_obj_set_style_local_text_color(view->value_label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, color);
-        lv_label_set_text_fmt(view->value_label, "%s:\n-- %s",
-                             profile->channels[i].name, profile->unit);
+        lv_label_set_text_fmt(view->value_label, "--%s", profile->unit);
 
     }
 }
@@ -235,7 +295,6 @@ static void build_blocks(void)
 {
     const sensor_profile_t *profile = selected_profile();
     uint32_t next = 0;
-    s_block_count = 0;
     while (1) {
         uint32_t start = 65536;
         for (unsigned i = 0; i < profile->channel_count; i++) {
@@ -251,6 +310,7 @@ static void build_blocks(void)
             if (!found) break;
             count++;
         }
+        s_block_profile[s_block_count] = s_selected;
         s_blocks[s_block_count++] = (modbus_request_t) {
             .response_queue = s_responses, .slave_id = profile->slave_id,
             .function_code = SENSOR_FUNCTION_CODE, .reg_addr = start, .reg_count = count,
@@ -259,24 +319,14 @@ static void build_blocks(void)
     }
 }
 
+static void render_graph(void);
 static void select_sensor(unsigned index)
 {
     if (index >= SENSOR_PROFILE_COUNT) return;
     s_selected = index;
-    s_generation++;
-    memset(s_cycle_valid, 0, sizeof(s_cycle_valid));
-    for (unsigned i = 0; i < SENSOR_PROFILE_COUNT; i++) {
-        lv_obj_set_style_local_border_color(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT,
-            i == index ? lv_theme_get_color_primary() : lv_color_hex(0x8193AC));
-        lv_obj_set_style_local_border_width(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, i == index ? 2 : 1);
-    }
     lv_obj_set_parent(s_graphs, lv_page_get_scrl(s_graph_pages[index]));
-    if (!selected_profile()->serial_enabled) s_running = false;
-    lv_btn_set_state(s_start, !selected_profile()->serial_enabled ? LV_BTN_STATE_DISABLED :
-                     s_running ? LV_BTN_STATE_CHECKED_RELEASED : LV_BTN_STATE_RELEASED);
-    build_blocks();
     rebuild_graphs();
-    update_status();
+    render_graph();
 }
 
 void lv_edpd_select_sensor(unsigned index)
@@ -287,46 +337,46 @@ void lv_edpd_select_sensor(unsigned index)
 static void start_event_cb(lv_obj_t *obj, lv_event_t event)
 {
     if (event != LV_EVENT_VALUE_CHANGED) return;
-    if (!s_responses || !selected_profile()->serial_enabled) {
+    if (!s_responses) {
         lv_btn_set_state(obj, LV_BTN_STATE_RELEASED);
         return;
     }
     s_running = lv_btn_get_state(obj) == LV_BTN_STATE_CHECKED_RELEASED ||
                 lv_btn_get_state(obj) == LV_BTN_STATE_CHECKED_PRESSED;
     s_generation++;
-    memset(s_cycle_valid, 0, sizeof(s_cycle_valid));
+    memset(s_all_valid, 0, sizeof(s_all_valid));
+    memset(s_received, 0, sizeof(s_received));
+    update_reception();
     update_status();
 }
 
 static void display_sample(unsigned channel, bool valid, uint16_t raw)
 {
     const sensor_profile_t *profile = selected_profile();
-    s_cycle_raw[channel] = raw;
-    s_cycle_valid[channel] = valid;
     if (valid) {
         char value[24];
         format_value(value, sizeof(value), raw);
-        lv_label_set_text_fmt(s_views[channel].value_label, "%s:\n%s %s",
-                             profile->channels[channel].name, value, profile->unit);
+        if (profile->channel_count == 1)
+            lv_label_set_text_fmt(s_views[channel].value_label, "%s: %s %s", profile->name, value, profile->unit);
+        else
+            lv_label_set_text_fmt(s_views[channel].value_label, "%s%s", value, profile->unit);
     } else {
-        lv_label_set_text_fmt(s_views[channel].value_label, "%s:\n응답 없음",
-                             profile->channels[channel].name);
+        if (profile->channel_count == 1)
+            lv_label_set_text_fmt(s_views[channel].value_label, "%s: 응답 없음", profile->name);
+        else
+            lv_label_set_text(s_views[channel].value_label, "--");
     }
 
 }
 
 /* Commit the complete sweep at once. Sensor bounds define the fixed Y axis;
  * clipping the plot never clips the displayed current values. */
-static void commit_sweep(void)
+static void render_graph(void)
 {
     const sensor_profile_t *profile = selected_profile();
     for (unsigned i = 0; i < profile->channel_count; i++) {
         channel_view_t *view = &s_views[i];
-        memmove(view->history, view->history + 1, (CHART_POINTS - 1) * sizeof(view->history[0]));
-        memmove(view->valid, view->valid + 1, (CHART_POINTS - 1) * sizeof(view->valid[0]));
-        view->history[CHART_POINTS - 1] = s_cycle_raw[i];
-        view->valid[CHART_POINTS - 1] = s_cycle_valid[i];
-        display_sample(i, s_cycle_valid[i], s_cycle_raw[i]);
+        if (s_has_started && profile->serial_enabled) display_sample(i, view->valid[CHART_POINTS - 1], view->history[CHART_POINTS - 1]);
         lv_coord_t points[CHART_POINTS];
         for (unsigned j = 0; j < CHART_POINTS; j++) {
             if (!view->valid[j]) { points[j] = LV_CHART_POINT_DEF; continue; }
@@ -339,7 +389,21 @@ static void commit_sweep(void)
         lv_chart_set_points(s_chart, view->series, points);
     }
     update_tooltip(false);
-    memset(s_cycle_valid, 0, sizeof(s_cycle_valid));
+}
+
+static void commit_sweep(void)
+{
+    for (unsigned p = 0; p < SENSOR_PROFILE_COUNT; p++) {
+        if (!sensor_profiles[p].serial_enabled) continue;
+        for (unsigned i = 0; i < sensor_profiles[p].channel_count; i++) {
+            channel_view_t *view = &s_all_views[p][i];
+            memmove(view->history, view->history + 1, (CHART_POINTS - 1) * sizeof(view->history[0]));
+            memmove(view->valid, view->valid + 1, (CHART_POINTS - 1) * sizeof(view->valid[0]));
+            view->history[CHART_POINTS - 1] = s_all_raw[p][i];
+            view->valid[CHART_POINTS - 1] = s_all_valid[p][i];
+        }
+    }
+    render_graph();
 }
 
 static void poll_task(lv_task_t *task)
@@ -356,12 +420,17 @@ static void poll_task(lv_task_t *task)
                 data.reg_addr != req->reg_addr || data.reg_count != req->reg_count) continue;
             s_block_done[b] = true;
             if (s_running && s_pending_generation == s_generation) {
-                const sensor_profile_t *profile = selected_profile();
+                unsigned p = s_block_profile[b];
+                const sensor_profile_t *profile = &sensor_profiles[p];
+                if (data.valid) {
+                    s_received[p] = true;
+                    s_received_at[p] = xTaskGetTickCount();
+                }
                 for (unsigned ch = 0; ch < profile->channel_count; ch++) {
                     uint32_t addr = profile->channels[ch].device_address;
                     if (addr < req->reg_addr || addr >= (uint32_t)req->reg_addr + req->reg_count) continue;
-                    s_cycle_valid[ch] = data.valid;
-                    s_cycle_raw[ch] = data.valid ? (uint16_t)data.values[addr - req->reg_addr] : 0;
+                    s_all_valid[p][ch] = data.valid;
+                    s_all_raw[p][ch] = data.valid ? (uint16_t)data.values[addr - req->reg_addr] : 0;
                 }
             }
             bool all_done = true;
@@ -373,8 +442,9 @@ static void poll_task(lv_task_t *task)
             break;
         }
     }
+    update_reception();
     TickType_t now = xTaskGetTickCount();
-    if (s_pending || !s_running || !selected_profile()->serial_enabled ||
+    if (s_pending || !s_running ||
         (s_has_started && now - s_last_start < SWEEP_INTERVAL)) return;
     modbus_request_t requests[SENSOR_MAX_CHANNELS];
     for (unsigned i = 0; i < s_block_count; i++) {
@@ -386,7 +456,7 @@ static void poll_task(lv_task_t *task)
     memcpy(s_batch_requests, requests, s_block_count * sizeof(requests[0]));
     s_batch_count = s_block_count;
     memset(s_block_done, 0, sizeof(s_block_done));
-    memset(s_cycle_valid, 0, sizeof(s_cycle_valid));
+    memset(s_all_valid, 0, sizeof(s_all_valid));
     s_pending_generation = s_generation;
     s_last_start = now;
     s_has_started = true;
@@ -399,9 +469,16 @@ void lv_edpd_widgets_create(lv_obj_t *page, lv_obj_t **graph_pages)
     s_value_font = *s_base_font;
     s_value_font.get_glyph_dsc = value_glyph;
     s_value_font.get_glyph_bitmap = value_bitmap;
+    s_small_value_font = lv_font_montserrat_9;
+    s_small_value_font.get_glyph_dsc = value_glyph;
+    s_small_value_font.get_glyph_bitmap = value_bitmap;
+    s_number_font = lv_font_montserrat_12;
+    s_number_font.get_glyph_dsc = value_glyph;
+    s_number_font.get_glyph_bitmap = value_bitmap;
     s_responses = xQueueCreate(MODBUS_QUEUE_SIZE, sizeof(modbus_data_t));
     s_running = s_pending = s_has_started = false;
     page_layout(page);
+    lv_obj_set_style_local_pad_inner(page, LV_PAGE_PART_SCROLLABLE, LV_STATE_DEFAULT, 4);
     lv_obj_set_style_local_pad_top(page, LV_PAGE_PART_BG, LV_STATE_DEFAULT, 6);
     lv_coord_t width = lv_page_get_width_fit(page);
 
@@ -410,9 +487,9 @@ void lv_edpd_widgets_create(lv_obj_t *page, lv_obj_t **graph_pages)
     lv_cont_set_fit2(controls, LV_FIT_NONE, LV_FIT_TIGHT);
     lv_obj_set_width(controls, width);
     card_style(controls);
-    lv_obj_set_style_local_pad_top(controls, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 6);
-    lv_obj_set_style_local_pad_bottom(controls, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 6);
-    lv_obj_set_style_local_pad_inner(controls, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 8);
+    lv_obj_set_style_local_pad_top(controls, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 3);
+    lv_obj_set_style_local_pad_bottom(controls, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 3);
+    lv_obj_set_style_local_pad_inner(controls, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 4);
     lv_coord_t inner_width = lv_obj_get_width_fit(controls) - COMPONENT_RIGHT_SPACE;
     lv_coord_t column_width = (inner_width - 8) / 2;
     lv_obj_t *speed_label = lv_label_create(controls, NULL);
@@ -420,14 +497,17 @@ void lv_edpd_widgets_create(lv_obj_t *page, lv_obj_t **graph_pages)
     lv_obj_t *speed_row = row_create(controls, inner_width);
     s_baud_dropdown = lv_dropdown_create(speed_row, NULL);
     lv_dropdown_set_options(s_baud_dropdown, "9600\n19200\n38400\n57600\n115200\n230400\n460800\n921600");
-    lv_dropdown_set_selected(s_baud_dropdown, 0);
+    lv_dropdown_set_selected(s_baud_dropdown, 4);
+	//기본 드롭다운 115200으로ㅋ
     lv_dropdown_set_max_height(s_baud_dropdown, 150);
     lv_obj_set_width(s_baud_dropdown, column_width);
+    lv_obj_set_style_local_pad_top(s_baud_dropdown, LV_DROPDOWN_PART_MAIN, LV_STATE_DEFAULT, 5);
+    lv_obj_set_style_local_pad_bottom(s_baud_dropdown, LV_DROPDOWN_PART_MAIN, LV_STATE_DEFAULT, 5);
     lv_obj_set_style_local_text_font(s_baud_dropdown, LV_DROPDOWN_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_16);
     lv_obj_set_style_local_text_font(s_baud_dropdown, LV_DROPDOWN_PART_LIST, LV_STATE_DEFAULT, &lv_font_montserrat_16);
     s_start = lv_btn_create(speed_row, NULL);
     lv_btn_set_fit(s_start, LV_FIT_NONE);
-    lv_obj_set_size(s_start, column_width, 37);
+    lv_obj_set_size(s_start, column_width, 30);
     lv_obj_set_style_local_radius(s_start, LV_BTN_PART_MAIN, LV_STATE_DEFAULT, 8);
     lv_btn_set_checkable(s_start, true);
     lv_btn_set_state(s_start, LV_BTN_STATE_RELEASED);
@@ -435,6 +515,7 @@ void lv_edpd_widgets_create(lv_obj_t *page, lv_obj_t **graph_pages)
     lv_obj_set_drag_parent(s_start, true);
     s_start_label = lv_label_create(s_start, NULL);
     s_status = lv_label_create(controls, NULL);
+    lv_obj_set_style_local_text_font(s_status, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_12);
     lv_label_set_long_mode(s_status, LV_LABEL_LONG_BREAK);
     lv_obj_set_width(s_status, inner_width);
 
@@ -449,13 +530,16 @@ void lv_edpd_widgets_create(lv_obj_t *page, lv_obj_t **graph_pages)
         lv_obj_set_width(card, (width - COMPONENT_RIGHT_SPACE - 8) / 2);
         card_style(card);
         lv_obj_set_click(card, false);
-        lv_obj_set_style_local_pad_inner(card, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 4);
+        lv_obj_set_style_local_pad_top(card, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 3);
+        lv_obj_set_style_local_pad_bottom(card, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 3);
+        lv_obj_set_style_local_pad_inner(card, LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 0);
         lv_obj_t *name = lv_label_create(card, NULL);
+        lv_obj_set_style_local_text_font(name, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_12);
         lv_label_set_text(name, profile->name);
         lv_obj_t *details = lv_label_create(card, NULL);
         lv_obj_set_style_local_text_font(details, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_12);
-        lv_label_set_text_fmt(details, "%u channels | ID %u\nFC03 | %s",
-            profile->channel_count, profile->slave_id, profile->serial_enabled ? "500 ms" : "OFF");
+        lv_label_set_text_fmt(details, "%uch | ID %u%s",
+            profile->channel_count, profile->slave_id, profile->serial_enabled ? "" : " | OFF");
         lv_obj_set_drag_parent(name, true);
         lv_obj_set_drag_parent(details, true);
     }
@@ -470,6 +554,11 @@ void lv_edpd_widgets_create(lv_obj_t *page, lv_obj_t **graph_pages)
     lv_cont_set_fit2(s_graphs, LV_FIT_NONE, LV_FIT_TIGHT);
     lv_obj_set_width(s_graphs, lv_page_get_width_fit(graph_page));
     card_style(s_graphs);
+    s_block_count = 0;
+    for (s_selected = 0; s_selected < SENSOR_PROFILE_COUNT; s_selected++)
+        if (selected_profile()->serial_enabled) build_blocks();
     select_sensor(0);
+    update_status();
+    update_reception();
     lv_task_create(poll_task, 10, LV_TASK_PRIO_LOW, NULL);
 }

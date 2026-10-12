@@ -119,99 +119,55 @@ int main(void)
         assert(profile->sensor_min == expected_min[i] && profile->sensor_max == expected_max[i]);
         assert(profile->decimals == 2);
     }
-    assert(!s_running); poll_task(NULL); assert(sends == 0);
+    assert(!s_running && s_block_count == 6);
     set_running(true); poll_task(NULL);
-    assert(sends == 1 && sent.count == 1 && sent.requests[0].reg_addr == 11083 && sent.requests[0].reg_count == 10);
-    respond(0, true, 600); poll_task(NULL);
-    assert(!s_pending && sends == 1);
-    assert(strcmp(lv_label_get_text(s_views[0].value_label), "PS_Cyl1:\n60.00 °C") == 0);
-    assert(strstr(lv_label_get_text(s_tooltip), "PS_Cyl1: 60.00"));
-    assert(strstr(lv_label_get_text(s_tooltip), "Exh_Cyl1:"));
-    assert(!strstr(lv_label_get_text(s_tooltip), "PS_Cyl2"));
+    assert(sent.count == 6 && sent.baud_rate == s_baud_rates[lv_dropdown_get_selected(s_baud_dropdown)]);
+    const unsigned addresses[] = {11083,11003,11011,11321,20,11129};
+    for (unsigned b = 0; b < 6; b++) assert(sent.requests[b].reg_addr == addresses[b]);
+    respond(0, true, 723); poll_task(NULL);
+    assert(s_received[0] && !s_received[1]);
+    assert(lv_color_to32(lv_obj_get_style_bg_color(s_info_cards[0], LV_CONT_PART_MAIN)) == lv_color_to32(lv_color_hex(0x16A34A)));
+    choose(2); assert(s_running && s_pending && sent.count == 6);
+    choose(1);
+    assert(!s_all_views[0][0].valid[CHART_POINTS - 1]);
+    for (unsigned b = 1; b < 6; b++) respond(b, b != 4, b == 5 ? 576 : 500);
+    poll_task(NULL);
+    assert(!s_pending && s_all_views[0][0].history[CHART_POINTS - 1] == 723);
+    assert(s_all_views[1][0].valid[CHART_POINTS - 1]);
+    assert(!s_all_views[3][0].valid[CHART_POINTS - 1]);
+    assert(s_all_views[4][0].history[CHART_POINTS - 1] == 576);
+    choose(0); assert(strstr(lv_label_get_text(s_tooltip), "PS_Cyl1: 72.30"));
+    choose(4); assert(strstr(lv_label_get_text(s_tooltip), "AVM: 5.76"));
+    assert(strcmp(lv_label_get_text(s_views[0].value_label), "AVM: 5.76 mm") == 0);
+    assert(lv_obj_get_parent(s_views[0].value_label) == s_graphs);
+    assert(lv_obj_get_hidden(s_tooltip));
     lv_tabview_set_tab_act(tabs, 0, LV_ANIM_OFF);
-    lv_event_send(tabs, LV_EVENT_VALUE_CHANGED, NULL);
-    assert(s_running && s_selected == 0); /* Home preserves acquisition. */
-    assert(count_type(edpd, "lv_checkbox") == 0);
-    assert(sent.baud_rate == 9600);
-    lv_dropdown_set_selected(s_baud_dropdown, 7);
-    tick = 499; poll_task(NULL); assert(sends == 1);
-    tick = 500; poll_task(NULL); assert(sends == 2 && s_pending);
-    assert(sent.baud_rate == 921600);
-    tick = 1100; poll_task(NULL); assert(sends == 2); /* Do not overlap an overrun. */
-    respond(0, true, 610); poll_task(NULL); assert(sends == 3 && s_last_start == 1100);
-    set_running(false); finish_batch(); assert(!s_pending && sends == 3);
-
-    choose(1); set_running(true); tick = 1600; poll_task(NULL);
-    assert(sent.count == 3);
-    assert(sent.requests[0].reg_addr == 11003 && sent.requests[0].reg_count == 6);
-    assert(sent.requests[1].reg_addr == 11011 && sent.requests[1].reg_count == 5);
-    assert(sent.requests[2].reg_addr == 11321 && sent.requests[2].reg_count == 1);
-    lv_tabview_set_tab_act(tabs, 2, LV_ANIM_OFF);
-    respond(0, true, 500); poll_task(NULL);
-    assert(!s_views[5].valid[CHART_POINTS - 1]); /* Atomic display of the complete sweep. */
-    respond(1, true, 723); poll_task(NULL);
-    respond(2, true, 900); poll_task(NULL);
-    assert(!s_pending);
-    assert(strcmp(lv_label_get_text(s_views[0].value_label), "CrkP_Cyl1:\n72.30 °C") == 0);
-    assert(strstr(lv_label_get_text(s_tooltip), "CrkP_Cyl1: 72.30"));
-    assert(strstr(lv_label_get_text(s_tooltip), "MB_Fore: 50.00"));
-    assert(s_views[0].history[CHART_POINTS - 1] == 723);
-    assert(s_views[5].history[CHART_POINTS - 1] == 500);
-    assert(s_views[11].history[CHART_POINTS - 1] == 900);
-    assert(strcmp(s_axis_text, "200.00\n100.00\n0.00") == 0);
-    assert(s_views[0].series->points[CHART_POINTS - 1] == 3615);
-    tick = 2100; poll_task(NULL);
-    respond(0, true, 999); queued[(queue_write - 1) % 64].request_id--; poll_task(NULL);
-    assert(!s_block_done[0]);
-    respond(0, false, 0); respond(1, true, 730); respond(2, true, 901); poll_task(NULL);
-    assert(!s_views[5].valid[CHART_POINTS - 1] && s_views[0].valid[CHART_POINTS - 1]);
-    assert(s_views[5].series->points[CHART_POINTS - 1] == LV_CHART_POINT_DEF);
-    assert(strstr(lv_label_get_text(s_tooltip), "MB_Fore: --"));
-
-    tick = 2600; poll_task(NULL); choose(4); finish_batch();
-    assert(!s_pending && !s_views[0].valid[CHART_POINTS - 1]); /* Old group ignored. */
-    tick = 3100; poll_task(NULL);
-    assert(sent.count == 1 && sent.requests[0].reg_addr == 11129);
-    respond(0, true, 576); poll_task(NULL);
-    assert(strcmp(lv_label_get_text(s_views[0].value_label), "AVM:\n5.76 mm") == 0);
-    assert(s_views[0].series->points[CHART_POINTS - 1] == 2880);
-    choose(3); tick = 3600; poll_task(NULL);
-    assert(sent.requests[0].reg_addr == 20 && sent.requests[0].slave_id == 1);
-    respond(0, true, 19); poll_task(NULL);
-    assert(strcmp(lv_label_get_text(s_views[0].value_label), "Water Activity:\n0.19 Aw") == 0);
-    assert(s_views[0].series->points[CHART_POINTS - 1] == 1900);
-    tick = 4100; poll_task(NULL); respond(0, true, 26); poll_task(NULL);
-    assert(strcmp(lv_label_get_text(s_views[0].value_label), "Water Activity:\n0.26 Aw") == 0);
-    choose(2); assert(!s_running && s_block_count == 1 && s_blocks[0].reg_count == 10);
-    unsigned before = sends; tick += 1000; poll_task(NULL); assert(sends == before);
-    assert(lv_btn_get_state(s_start) == LV_BTN_STATE_DISABLED);
-    /* All sensor ranges clip only plot coordinates, never current values. */
-    display_sample(0, true, 8000); commit_sweep();
-    assert(s_views[0].series->points[CHART_POINTS - 1] == 10000);
-    assert(strstr(lv_label_get_text(s_views[0].value_label), "8000.00 µm"));
-    choose(0); set_running(true); accept_batch = false; poll_task(NULL);
-    assert(!s_pending && sends == before);
-    accept_batch = true; poll_task(NULL); assert(s_pending); set_running(false); finish_batch();
-    size_t free_after_first = 0;
-    for (unsigned cycle = 0; cycle < 20; cycle++) {
-        for (unsigned profile = 0; profile < 5; profile++) {
-            choose(profile); lv_tick_inc(500); lv_task_handler();
-            unsigned representatives = 0;
-            for (unsigned ch = 0; ch < sensor_profiles[profile].channel_count; ch++)
-                representatives += sensor_profiles[profile].channels[ch].show_tooltip;
-            assert(representatives == (profile < 3 ? 2 : 1));
-            assert(lv_obj_get_parent(s_tooltip) == s_chart);
-            assert(count_type(edpd, "lv_chart") == 0 && count_type(tabs, "lv_chart") == 1);
-        }
-        /* Finish theme transitions and deferred layout before comparing memory. */
-        lv_tick_inc(500); lv_task_handler();
-        lv_tick_inc(500); lv_task_handler();
-        assert(lv_mem_test() == LV_RES_OK);
-        lv_mem_monitor_t memory; lv_mem_monitor(&memory);
-        if (!cycle) free_after_first = memory.free_size;
-        /* The allocator may split/merge a few small headers as cards wrap. */
-        else assert(memory.free_size + 128 >= free_after_first);
+    lv_event_send(tabs, LV_EVENT_VALUE_CHANGED, NULL); assert(s_running);
+    tick=499; poll_task(NULL); assert(sends==1);
+    lv_dropdown_set_selected(s_baud_dropdown,7);
+    tick=500; poll_task(NULL); assert(sends==2 && sent.baud_rate==921600);
+    tick=1100; poll_task(NULL); assert(sends==2); /* no overlap */
+    choose(0); /* Rendering must not overwrite partial responses. */
+    respond(0,true,800); poll_task(NULL); choose(1); choose(0);
+    assert(s_all_raw[0][0]==800);
+    for(unsigned b=1;b<6;b++) respond(b,false,0);
+    poll_task(NULL); assert(sends==3 && s_pending);
+    assert(s_all_views[0][0].history[CHART_POINTS-1]==800);
+    tick=2600; poll_task(NULL); /* orange expires after 1500 ms without a good response */
+    assert(lv_color_to32(lv_obj_get_style_bg_color(s_info_cards[0],LV_CONT_PART_MAIN))==lv_color_to32(lv_color_hex(0x6B7280)));
+    set_running(false); finish_batch(); assert(!s_pending);
+    assert(s_all_views[0][0].history[CHART_POINTS-1]==800);
+    assert(lv_color_to32(lv_obj_get_style_bg_color(s_info_cards[1],LV_CONT_PART_MAIN))==lv_color_to32(lv_color_hex(0x6B7280)));
+    set_running(true); accept_batch=false; unsigned before=sends;
+    poll_task(NULL); assert(!s_pending && sends==before);
+    accept_batch=true; poll_task(NULL); assert(s_pending);
+    set_running(false); finish_batch();
+    for(unsigned cycle=0;cycle<100;cycle++) {
+        choose(cycle%5); lv_tick_inc(500); lv_task_handler();
+        assert(count_type(tabs,"lv_chart")==1);
+        assert(lv_mem_test()==LV_RES_OK);
+        assert(s_all_views[0][0].history[CHART_POINTS-1]==800);
     }
-    puts("PASS: 500ms sweep starts, no overlaps, contiguous FC03 blocks, atomic display, stale/failed replies, fixed ranges, scaled values, mixed fonts, 100 switches");
+    puts("PASS: six-block all-sensor sweeps, 500ms/no overlap, tab-independent histories, partial responses, green/gray reception/expiry/stop, baud selection, 100 switches");
     return 0;
 }

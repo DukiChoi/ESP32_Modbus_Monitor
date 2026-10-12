@@ -41,3 +41,5 @@ const lv_font_t lv_app_font = {
     .base_line = 5,
     .subpx = LV_FONT_SUBPX_NONE,
 };
+
+#include "lv_app_font_small.inc"

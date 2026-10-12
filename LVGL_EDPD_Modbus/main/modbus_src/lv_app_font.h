@@ -3,4 +3,5 @@
 #include "lvgl/lvgl.h"
 /* Montserrat 16 for Latin/numbers/symbols, Galmuri9 for Hangul. */
 extern const lv_font_t lv_app_font;
+extern const lv_font_t lv_font_montserrat_9;
 #endif

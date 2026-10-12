@@ -29,7 +29,7 @@ void lv_modbus(void)
     lv_obj_t *home = lv_tabview_add_tab(tv, "Home");
     lv_obj_t *pages[SENSOR_PROFILE_COUNT];
     for (unsigned i = 0; i < SENSOR_PROFILE_COUNT; i++)
-        pages[i] = lv_tabview_add_tab(tv, sensor_profiles[i].name);
+        pages[i] = lv_tabview_add_tab(tv, i == 2 ? "BWACS" : i == 3 ? "OWACS" : sensor_profiles[i].name);
     lv_edpd_widgets_create(home, pages);
     lv_obj_set_event_cb(tv, tab_changed);
 }
