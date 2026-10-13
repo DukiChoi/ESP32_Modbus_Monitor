@@ -109,11 +109,14 @@ static void update_reception(void)
     TickType_t now = xTaskGetTickCount();
     for (unsigned i = 0; i < SENSOR_PROFILE_COUNT; i++) {
         bool active = s_running && s_received[i] && now - s_received_at[i] < pdMS_TO_TICKS(1500);
-        lv_color_t color = lv_color_hex(active ? 0x16A34A : 0x6B7280);
+        uint32_t reception_color = 0x16A34A;
+        if (strcmp(sensor_profiles[i].name, "B-WACS") == 0) reception_color = 0xF57C00;
+        else if (strcmp(sensor_profiles[i].name, "O-WACS") == 0) reception_color = 0x2563EB;
+        lv_color_t color = lv_color_hex(active ? reception_color : 0x6B7280);
         lv_obj_set_style_local_bg_color(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, color);
         lv_obj_set_style_local_bg_grad_color(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, color);
         lv_obj_set_style_local_bg_opa(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_COVER);
-        lv_obj_set_style_local_border_color(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, color);
+        lv_obj_set_style_local_border_color(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, lv_color_hex(reception_color));
         lv_obj_set_style_local_border_width(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, 1);
         lv_obj_set_style_local_border_opa(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_COVER);
         lv_obj_set_style_local_text_color(s_info_cards[i], LV_CONT_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
